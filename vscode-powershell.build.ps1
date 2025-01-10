@@ -7,12 +7,7 @@ param(
     [string]$EditorServicesRepoPath = $null
 )
 
-#Requires -Modules @{ModuleName="InvokeBuild";ModuleVersion="3.0.0"}
-
-# Grab package.json data which is used throughout the build.
-$script:PackageJson = Get-Content -Raw $PSScriptRoot/package.json | ConvertFrom-Json
-$script:IsPreviewExtension = $script:PackageJson.name -like "*preview*" -or $script:PackageJson.displayName -like "*preview*"
-Write-Host "`n### Extension: $($script:PackageJson.name)-$($script:PackageJson.version)`n" -ForegroundColor Green
+#Requires -Modules @{ ModuleName = "InvokeBuild"; ModuleVersion = "5.0.0" }
 
 function Get-EditorServicesPath {
     $psesRepoPath = if ($EditorServicesRepoPath) {
@@ -22,20 +17,19 @@ function Get-EditorServicesPath {
     }
     # NOTE: The ErrorActionPreference for both Invoke-Build and Azure DevOps
     # scripts is Stop, but we want to continue and return false here.
-    return Resolve-Path "$psesRepoPath/PowerShellEditorServices.build.ps1" -ErrorAction Continue
+    return Resolve-Path "$psesRepoPath/PowerShellEditorServices.build.ps1" -ErrorAction SilentlyContinue
 }
 
 #region Setup tasks
 
-task RestoreNodeModules -If { !(Test-Path ./node_modules) } {
-    Write-Host "`n### Restoring vscode-powershell dependencies`n" -ForegroundColor Green
-    # When in a CI build use the --loglevel=error parameter so that
-    # package install warnings don't cause PowerShell to throw up
-    if ($env:TF_BUILD) {
-        exec { & npm ci --loglevel=error }
-    } else {
-        exec { & npm install }
-    }
+task RestoreNode -If { !(Test-Path ./node_modules/esbuild) } {
+    Write-Build DarkGreen "Restoring build dependencies"
+    Invoke-BuildExec { & npm ci --omit=optional }
+}
+
+task RestoreNodeOptional -If { !(Test-Path ./node_modules/eslint) } {
+    Write-Build DarkMagenta "Restoring build, test, and lint dependencies"
+    Invoke-BuildExec { & npm ci --include=optional }
 }
 
 task RestoreEditorServices -If (Get-EditorServicesPath) {
@@ -44,61 +38,59 @@ task RestoreEditorServices -If (Get-EditorServicesPath) {
             # When debugging, we always rebuild PSES and ensure its symlinked so
             # that developers always have the latest local bits.
             if ((Get-Item ./modules -ErrorAction SilentlyContinue).LinkType -ne "SymbolicLink") {
-                Write-Host "`n### Creating symbolic link to PSES" -ForegroundColor Green
-                remove ./modules
+                Write-Build DarkMagenta "Creating symbolic link to PSES"
+                Remove-BuildItem ./modules
                 New-Item -ItemType SymbolicLink -Path ./modules -Target "$(Split-Path (Get-EditorServicesPath))/module"
             }
 
-            Write-Host "`n### Building PSES`n" -ForegroundColor Green
-            Invoke-Build Build (Get-EditorServicesPath)
+            Write-Build DarkGreen "Building PSES"
+            Invoke-Build Build (Get-EditorServicesPath) -Configuration $Configuration
         }
         "Release" {
             # When releasing, we ensure the bits are not symlinked but copied,
             # and only if they don't already exist.
             if ((Get-Item ./modules -ErrorAction SilentlyContinue).LinkType -eq "SymbolicLink") {
-                Write-Host "`n### Deleting PSES symbolic link" -ForegroundColor Green
-                remove ./modules
+                Write-Build DarkRed "Deleting PSES symbolic link"
+                Remove-BuildItem ./modules
             }
 
             if (!(Test-Path ./modules)) {
                 # We only build if it hasn't been built at all.
                 if (!(Test-Path "$(Split-Path (Get-EditorServicesPath))/module/PowerShellEditorServices/bin")) {
-                    Write-Host "`n### Building PSES`n" -ForegroundColor Green
-                    Invoke-Build Build (Get-EditorServicesPath)
+                    Write-Build DarkGreen "Building PSES"
+                    Invoke-Build Build (Get-EditorServicesPath) -Configuration $Configuration
                 }
 
-                Write-Host "`n### Copying PSES`n" -ForegroundColor Green
+                Write-Build DarkGreen "Copying PSES"
                 Copy-Item -Recurse -Force "$(Split-Path (Get-EditorServicesPath))/module" ./modules
             }
         }
     }
 }
 
-task Restore RestoreEditorServices, RestoreNodeModules
-
 #endregion
 #region Clean tasks
 
 task Clean {
-    Write-Host "`n### Cleaning vscode-powershell`n" -ForegroundColor Green
-    remove ./modules, ./out, ./node_modules, *.vsix
+    Write-Build DarkMagenta "Cleaning vscode-powershell"
+    Remove-BuildItem *.js, *.js.map, ./dist, ./modules, ./node_modules, ./out
 }
 
 task CleanEditorServices -If (Get-EditorServicesPath) {
-    Write-Host "`n### Cleaning PowerShellEditorServices`n" -ForegroundColor Green
+    Write-Build DarkMagenta "Cleaning PSES"
     Invoke-Build Clean (Get-EditorServicesPath)
 }
 
 #endregion
 #region Build tasks
+task Lint RestoreNodeOptional, {
+    Write-Build DarkMagenta "Linting TypeScript"
+    Invoke-BuildExec { & npm run lint }
+}
 
-task Build Restore, {
-    Write-Host "`n### Building vscode-powershell`n" -ForegroundColor Green
-    assert (Test-Path ./modules/PowerShellEditorServices/bin) "Extension requires PSES"
-
-    # TODO: TSLint is deprecated and we need to switch to ESLint.
-    # https://github.com/PowerShell/vscode-powershell/pull/3331
-    exec { & npm run lint }
+task Build RestoreEditorServices, RestoreNode, {
+    Write-Build DarkGreen "Building vscode-powershell"
+    Assert-Build (Test-Path ./modules/PowerShellEditorServices/bin) "Extension requires PSES"
 
     # TODO: When supported we should use `esbuild` for the tests too. Although
     # we now use `esbuild` to transpile, bundle, and minify the extension, we
@@ -107,51 +99,54 @@ task Build Restore, {
     # Unfortunately `esbuild` doesn't support emitting 1:1 files (yet).
     # https://github.com/evanw/esbuild/issues/944
     switch ($Configuration) {
-        "Debug" { exec { & npm run build -- --sourcemap } }
-        "Release" { exec { & npm run build -- --minify } }
+        "Debug" { Invoke-BuildExec { & npm run compile } }
+        "Release" { Invoke-BuildExec { & npm run compile -- --minify } }
     }
 }
 
 #endregion
 #region Test tasks
 
-task Test -If (!($env:TF_BUILD -and $global:IsLinux)) Build, {
-    Write-Host "`n### Running extension tests" -ForegroundColor Green
-    exec { & npm run test }
+task Test Lint, Build, {
+    Write-Build DarkMagenta "Running extension tests"
+    Invoke-BuildExec { & npm run test }
     # Reset the state of files modified by tests
-    exec { git checkout package.json test/.vscode/settings.json}
+    Invoke-BuildExec { git checkout package.json test/TestEnvironment.code-workspace }
 }
 
 task TestEditorServices -If (Get-EditorServicesPath) {
-    Write-Host "`n### Testing PowerShellEditorServices`n" -ForegroundColor Green
+    Write-Build DarkMagenta "Testing PSES"
     Invoke-Build Test (Get-EditorServicesPath)
 }
 
 #endregion
 #region Package tasks
 
-task UpdateReadme -If { $script:IsPreviewExtension } {
-    # Add the preview text
-    $newReadmeTop = '# PowerShell Language Support for Visual Studio Code
+task Package {
+    [semver]$version = $((Get-Content -Raw -Path package.json | ConvertFrom-Json).version)
+    Write-Build DarkGreen "Packaging powershell-$version.vsix"
+    Remove-BuildItem ./out
+    New-Item -ItemType Directory -Force out | Out-Null
 
-> ## ATTENTION: This is the PREVIEW version of the PowerShell extension for VSCode which contains features that are being evaluated for stable. It works with PowerShell 5.1 and up.
-> ### If you are looking for the stable version, please [go here](https://marketplace.visualstudio.com/items?itemName=ms-vscode.PowerShell) or install the extension called "PowerShell" (not "PowerShell Preview")
-> ## NOTE: If you have both stable (aka "PowerShell") and preview (aka "PowerShell Preview") installed, you MUST [DISABLE](https://code.visualstudio.com/docs/editor/extension-gallery#_disable-an-extension) one of them for the best performance. Docs on how to disable an extension can be found [here](https://code.visualstudio.com/docs/editor/extension-gallery#_disable-an-extension)'
-    $readmePath = (Join-Path $PSScriptRoot README.md)
+    Assert-Build (Test-Path ./dist/extension.js) "Extension must be built!"
 
-    $readmeContent = Get-Content -Path $readmePath
-    if (!($readmeContent -match "This is the PREVIEW version of the PowerShell extension")) {
-        $readmeContent[0] = $newReadmeTop
-        $readmeContent | Set-Content $readmePath -Encoding utf8
+    # Packaging requires a copy of the modules folder, not a symbolic link. But
+    # we might have built in Debug configuration, not Release, and still want to
+    # package it. So delete the symlink and copy what we just built.
+    if ((Get-Item ./modules -ErrorAction SilentlyContinue).LinkType -eq "SymbolicLink") {
+        Write-Build DarkRed "PSES is a symbolic link, replacing with copy!"
+        Remove-BuildItem ./modules
+        Copy-Item -Recurse -Force "$(Split-Path (Get-EditorServicesPath))/module" ./modules
     }
-}
 
-task Package UpdateReadme, Build, {
-    Write-Host "`n### Packaging $($script:PackageJson.name)-$($script:PackageJson.version).vsix`n" -ForegroundColor Green
-    assert ((Get-Item ./modules).LinkType -ne "SymbolicLink") "Packaging requires a copy of PSES, not a symlink!"
-    exec { & npm run package }
+    if ($version.Minor % 2 -ne 0) {
+        Write-Build DarkRed "This is a pre-release!"
+        Invoke-BuildExec { & npm run package -- --pre-release }
+    } else {
+        Invoke-BuildExec { & npm run package }
+    }
 }
 
 #endregion
 
-task . Build, Test, Package
+task . Test, Package

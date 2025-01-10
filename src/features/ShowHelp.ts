@@ -3,35 +3,47 @@
 
 import vscode = require("vscode");
 import { NotificationType } from "vscode-languageclient";
-import { Logger } from "../logging";
 import { LanguageClientConsumer } from "../languageClientConsumer";
+import type { LanguageClient } from "vscode-languageclient/node";
+
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+interface IShowHelpNotificationArguments {
+}
 
 export const ShowHelpNotificationType =
-    new NotificationType<any>("powerShell/showHelp");
+    new NotificationType<IShowHelpNotificationArguments>("powerShell/showHelp");
 
 export class ShowHelpFeature extends LanguageClientConsumer {
     private command: vscode.Disposable;
 
-    constructor(private log: Logger) {
+    constructor() {
         super();
-        this.command = vscode.commands.registerCommand("PowerShell.ShowHelp", (item?) => {
-            if (!item || !item.Name) {
+        this.command = vscode.commands.registerCommand("PowerShell.ShowHelp", async (item?) => {
+            if (!item?.Name) {
 
                 const editor = vscode.window.activeTextEditor;
+                if (editor === undefined) {
+                    return;
+                }
 
                 const selection = editor.selection;
                 const doc = editor.document;
                 const cwr = doc.getWordRangeAtPosition(selection.active);
                 const text = doc.getText(cwr);
 
-                this.languageClient.sendNotification(ShowHelpNotificationType, { text });
+                const client = await LanguageClientConsumer.getLanguageClient();
+                await client.sendNotification(ShowHelpNotificationType, { text });
             } else {
-                this.languageClient.sendNotification(ShowHelpNotificationType, { text: item.Name } );
+                const client = await LanguageClientConsumer.getLanguageClient();
+                await client.sendNotification(ShowHelpNotificationType, { text: item.Name });
             }
         });
     }
 
-    public dispose() {
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    public override onLanguageClientSet(_languageClient: LanguageClient): void {}
+
+    public dispose(): void {
         this.command.dispose();
     }
 

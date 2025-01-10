@@ -1,14 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-"use strict";
-
 import vscode = require("vscode");
 import { NotificationType, RequestType } from "vscode-languageclient";
 import { LanguageClient } from "vscode-languageclient/node";
 import { ICheckboxQuickPickItem, showCheckboxQuickPick } from "../controls/checkboxQuickPick";
-import { Logger } from "../logging";
-import Settings = require("../settings");
+import { ILogger } from "../logging";
+import { getSettings } from "../settings";
 import { LanguageClientConsumer } from "../languageClientConsumer";
 
 export const EvaluateRequestType = new RequestType<IEvaluateRequestArguments, void, void>("evaluate");
@@ -50,19 +48,17 @@ interface IShowChoicePromptRequestArgs {
 }
 
 interface IShowChoicePromptResponseBody {
-    responseText: string;
+    responseText: string | undefined;
     promptCancelled: boolean;
 }
 
 interface IShowInputPromptResponseBody {
-    responseText: string;
+    responseText: string | undefined;
     promptCancelled: boolean;
 }
 
 
-function showChoicePrompt(
-    promptDetails: IShowChoicePromptRequestArgs,
-    client: LanguageClient): Thenable<IShowChoicePromptResponseBody> {
+function showChoicePrompt(promptDetails: IShowChoicePromptRequestArgs): Thenable<IShowChoicePromptResponseBody> {
 
     let resultThenable: Thenable<IShowChoicePromptResponseBody>;
 
@@ -75,7 +71,7 @@ function showChoicePrompt(
                 };
             });
 
-        if (promptDetails.defaultChoices && promptDetails.defaultChoices.length > 0) {
+        if (promptDetails.defaultChoices.length > 0) {
             // Shift the default items to the front of the
             // array so that the user can select it easily
             const defaultChoice = promptDetails.defaultChoices[0];
@@ -109,7 +105,7 @@ function showChoicePrompt(
         // Select the defaults
         for (const choice of promptDetails.defaultChoices) {
             checkboxQuickPickItems[choice].isSelected = true;
-        };
+        }
 
         resultThenable =
             showCheckboxQuickPick(
@@ -121,11 +117,12 @@ function showChoicePrompt(
     return resultThenable;
 }
 
-function showInputPrompt(promptDetails: IShowInputPromptRequestArgs): Thenable<IShowInputPromptResponseBody> {
-    return vscode.window.showInputBox({ placeHolder: promptDetails.name + ": " }).then(onInputEntered);
+async function showInputPrompt(promptDetails: IShowInputPromptRequestArgs): Promise<IShowInputPromptResponseBody> {
+    const responseText = await vscode.window.showInputBox({ placeHolder: promptDetails.name + ": " });
+    return onInputEntered(responseText);
 }
 
-function onItemsSelected(chosenItems: ICheckboxQuickPickItem[]): IShowChoicePromptResponseBody {
+function onItemsSelected(chosenItems: ICheckboxQuickPickItem[] | undefined): IShowChoicePromptResponseBody {
     if (chosenItems !== undefined) {
         return {
             promptCancelled: false,
@@ -140,7 +137,7 @@ function onItemsSelected(chosenItems: ICheckboxQuickPickItem[]): IShowChoiceProm
     }
 }
 
-function onItemSelected(chosenItem: vscode.QuickPickItem): IShowChoicePromptResponseBody {
+function onItemSelected(chosenItem: vscode.QuickPickItem | undefined): IShowChoicePromptResponseBody {
     if (chosenItem !== undefined) {
         return {
             promptCancelled: false,
@@ -155,7 +152,7 @@ function onItemSelected(chosenItem: vscode.QuickPickItem): IShowChoicePromptResp
     }
 }
 
-function onInputEntered(responseText: string): IShowInputPromptResponseBody {
+function onInputEntered(responseText: string | undefined): IShowInputPromptResponseBody {
     if (responseText !== undefined) {
         return {
             promptCancelled: false,
@@ -171,27 +168,31 @@ function onInputEntered(responseText: string): IShowInputPromptResponseBody {
 
 export class ConsoleFeature extends LanguageClientConsumer {
     private commands: vscode.Disposable[];
-    private handlers: vscode.Disposable[];
+    private handlers: vscode.Disposable[] = [];
 
-    constructor(private log: Logger) {
+    constructor(private logger: ILogger) {
         super();
         this.commands = [
             vscode.commands.registerCommand("PowerShell.RunSelection", async () => {
                 if (vscode.window.activeTerminal &&
                     vscode.window.activeTerminal.name !== "PowerShell Extension") {
-                    this.log.write("PowerShell Extension Terminal is not active! Running in current terminal using 'runSelectedText'");
+                    this.logger.write("PowerShell Extension Terminal is not active! Running in current terminal using 'runSelectedText'.");
                     await vscode.commands.executeCommand("workbench.action.terminal.runSelectedText");
 
                     // We need to honor the focusConsoleOnExecute setting here too. However, the boolean that `show`
                     // takes is called `preserveFocus` which when `true` the terminal will not take focus.
                     // This is the inverse of focusConsoleOnExecute so we have to inverse the boolean.
-                    vscode.window.activeTerminal.show(!Settings.load().integratedConsole.focusConsoleOnExecute);
+                    vscode.window.activeTerminal.show(!getSettings().integratedConsole.focusConsoleOnExecute);
                     await vscode.commands.executeCommand("workbench.action.terminal.scrollToBottom");
 
                     return;
                 }
 
                 const editor = vscode.window.activeTextEditor;
+                if (editor === undefined) {
+                    return;
+                }
+
                 let selectionRange: vscode.Range;
 
                 if (!editor.selection.isEmpty) {
@@ -199,8 +200,8 @@ export class ConsoleFeature extends LanguageClientConsumer {
                 } else {
                     selectionRange = editor.document.lineAt(editor.selection.start.line).range;
                 }
-
-                await this.languageClient.sendRequest(EvaluateRequestType, {
+                const client = await LanguageClientConsumer.getLanguageClient();
+                await client.sendRequest(EvaluateRequestType, {
                     expression: editor.document.getText(selectionRange),
                 });
 
@@ -212,25 +213,25 @@ export class ConsoleFeature extends LanguageClientConsumer {
         ];
     }
 
-    public dispose() {
+    public dispose(): void {
         for (const command of this.commands) {
             command.dispose();
         }
+
         for (const handler of this.handlers) {
             handler.dispose();
         }
     }
 
-    public setLanguageClient(languageClient: LanguageClient) {
-        this.languageClient = languageClient;
+    public override onLanguageClientSet(languageClient: LanguageClient): void {
         this.handlers = [
-            this.languageClient.onRequest(
+            languageClient.onRequest(
                 ShowChoicePromptRequestType,
-                (promptDetails) => showChoicePrompt(promptDetails, this.languageClient)),
+                (promptDetails) => showChoicePrompt(promptDetails)),
 
-            this.languageClient.onRequest(
+            languageClient.onRequest(
                 ShowInputPromptRequestType,
                 (promptDetails) => showInputPrompt(promptDetails)),
-        ]
+        ];
     }
 }
