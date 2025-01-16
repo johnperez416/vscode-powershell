@@ -7,11 +7,11 @@ import { ISECompatibilityFeature } from "../../src/features/ISECompatibility";
 import utils = require("../utils");
 
 describe("ISE compatibility feature", function () {
-    let currentTheme: string;
+    let currentTheme: string | undefined;
 
-    async function enableISEMode() { await vscode.commands.executeCommand("PowerShell.EnableISEMode"); }
-    async function disableISEMode() { await vscode.commands.executeCommand("PowerShell.DisableISEMode"); }
-    async function toggleISEMode() { await vscode.commands.executeCommand("PowerShell.ToggleISEMode"); }
+    async function enableISEMode(): Promise<void> { await vscode.commands.executeCommand("PowerShell.EnableISEMode"); }
+    async function disableISEMode(): Promise<void> { await vscode.commands.executeCommand("PowerShell.DisableISEMode"); }
+    async function toggleISEMode(): Promise<void> { await vscode.commands.executeCommand("PowerShell.ToggleISEMode"); }
 
     before(async function () {
         // Save user's current theme.
@@ -25,7 +25,7 @@ describe("ISE compatibility feature", function () {
         assert.strictEqual(vscode.workspace.getConfiguration("workbench").get("colorTheme"), currentTheme);
     });
 
-    describe("Enable ISE Mode updates expected settings", async function () {
+    describe("Enable ISE Mode updates expected settings", function () {
         before(enableISEMode);
         after(disableISEMode);
         for (const iseSetting of ISECompatibilityFeature.settings) {
@@ -36,7 +36,7 @@ describe("ISE compatibility feature", function () {
         }
     });
 
-    describe("Disable ISE Mode reverts expected settings", async function () {
+    describe("Disable ISE Mode reverts expected settings", function () {
         before(enableISEMode);
         before(disableISEMode);
         after(disableISEMode);
@@ -48,7 +48,7 @@ describe("ISE compatibility feature", function () {
         }
     });
 
-    describe("Toggle switches from enabled to disabled", async function () {
+    describe("Toggle switches from enabled to disabled", function () {
         before(enableISEMode);
         before(toggleISEMode);
         after(disableISEMode);
@@ -60,7 +60,7 @@ describe("ISE compatibility feature", function () {
         }
     });
 
-    describe("Toggle switches from disabled to enabled", async function () {
+    describe("Toggle switches from disabled to enabled", function () {
         before(disableISEMode);
         before(toggleISEMode);
         after(disableISEMode);
@@ -72,10 +72,12 @@ describe("ISE compatibility feature", function () {
         }
     });
 
-    describe("Color theme interactions", async function () {
+    describe("Color theme interactions", function () {
+        // These tests are slow because they change the user's theme.
+        this.slow(3000);
         beforeEach(enableISEMode);
 
-        function assertISESettings() {
+        function assertISESettings(): void {
             for (const iseSetting of ISECompatibilityFeature.settings) {
                 const currently = vscode.workspace.getConfiguration(iseSetting.path).get(iseSetting.name);
                 assert.notStrictEqual(currently, iseSetting.value);

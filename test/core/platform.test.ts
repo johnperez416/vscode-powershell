@@ -4,35 +4,50 @@
 import * as assert from "assert";
 import mockFS = require("mock-fs");
 import FileSystem = require("mock-fs/lib/filesystem");
+import * as os from "os";
 import * as path from "path";
 import rewire = require("rewire");
 import * as sinon from "sinon";
 import * as platform from "../../src/platform";
 import * as fs from "fs"; // NOTE: Necessary for mock-fs.
 import * as vscode from "vscode";
+import { stripQuotePair } from "../../src/utils";
 
 // We have to rewire the platform module so that mock-fs can be used, as it
 // overrides the fs module but not the vscode.workspace.fs module.
 const platformMock = rewire("../../src/platform");
 
-async function fakeCheckIfFileOrDirectoryExists(targetPath: string | vscode.Uri): Promise<boolean> {
+// eslint-disable-next-line @typescript-eslint/require-await
+async function fakeCheckIfFileExists(targetPath: string | vscode.Uri): Promise<boolean> {
     try {
-        fs.lstatSync(targetPath instanceof vscode.Uri ? targetPath.fsPath : targetPath);
-        return true;
+        const stat = fs.lstatSync(targetPath instanceof vscode.Uri ? targetPath.fsPath : targetPath);
+        return stat.isFile();
     } catch {
         return false;
     }
 }
 
+// eslint-disable-next-line @typescript-eslint/require-await
+async function fakeCheckIfDirectoryExists(targetPath: string | vscode.Uri): Promise<boolean> {
+    try {
+        const stat = fs.lstatSync(targetPath instanceof vscode.Uri ? targetPath.fsPath : targetPath);
+        return stat.isDirectory();
+    } catch {
+        return false;
+    }
+}
+
+// eslint-disable-next-line @typescript-eslint/require-await
 async function fakeReadDirectory(targetPath: string | vscode.Uri): Promise<string[]> {
     return fs.readdirSync(targetPath instanceof vscode.Uri ? targetPath.fsPath : targetPath);
 }
 
 const utilsMock = {
-    checkIfFileExists: fakeCheckIfFileOrDirectoryExists,
-    checkIfDirectoryExists: fakeCheckIfFileOrDirectoryExists,
-    readDirectory: fakeReadDirectory
-}
+    checkIfFileExists: fakeCheckIfFileExists,
+    checkIfDirectoryExists: fakeCheckIfDirectoryExists,
+    readDirectory: fakeReadDirectory,
+    stripQuotePair: stripQuotePair
+};
 
 platformMock.__set__("utils", utilsMock);
 
@@ -44,7 +59,7 @@ interface ITestPlatform {
     name: string;
     platformDetails: platform.IPlatformDetails;
     filesystem: FileSystem.DirectoryItems;
-    environmentVars?: Record<string, string>;
+    environmentVars: Record<string, string>;
 }
 
 /**
@@ -59,13 +74,16 @@ interface ITestPlatformSuccessCase extends ITestPlatform {
 // Platform configurations where we expect to find a set of PowerShells
 let successTestCases: ITestPlatformSuccessCase[];
 
-let msixAppDir = null;
-let pwshMsixPath = null;
-let pwshPreviewMsixPath = null;
+// Platform configurations for testing the powerShellAdditionalExePaths setting
+let additionalPowerShellExes: Record<string, string>;
+let successAdditionalTestCases: ITestPlatformSuccessCase[];
+
 if (process.platform === "win32") {
-    msixAppDir = path.join(process.env.LOCALAPPDATA, "Microsoft", "WindowsApps");
-    pwshMsixPath = path.join(msixAppDir, "Microsoft.PowerShell_8wekyb3d8bbwe", "pwsh.exe");
-    pwshPreviewMsixPath = path.join(msixAppDir, "Microsoft.PowerShellPreview_8wekyb3d8bbwe", "pwsh.exe");
+    const msixAppDir = path.join(process.env.LOCALAPPDATA!, "Microsoft", "WindowsApps");
+    const pwshMsixPath = path.join(msixAppDir, "Microsoft.PowerShell_8wekyb3d8bbwe", "pwsh.exe");
+    const pwshPreviewMsixPath = path.join(msixAppDir, "Microsoft.PowerShellPreview_8wekyb3d8bbwe", "pwsh.exe");
+    const pwshDailyDir = path.join(process.env.LOCALAPPDATA!, "Microsoft", "powershell-daily");
+    const pwshDailyPath = path.join(pwshDailyDir, "pwsh.exe");
 
     successTestCases = [
         {
@@ -121,6 +139,11 @@ if (process.platform === "win32") {
                     displayName: "Windows PowerShell (x86)",
                     supportsProperArguments: true
                 },
+                {
+                    exePath: pwshDailyPath,
+                    displayName: "PowerShell Daily",
+                    supportsProperArguments: true
+                }
             ],
             filesystem: {
                 "C:\\Program Files\\PowerShell": {
@@ -153,6 +176,9 @@ if (process.platform === "win32") {
                 "C:\\WINDOWS\\SysWOW64\\WindowsPowerShell\\v1.0": {
                     "powershell.exe": "",
                 },
+                [pwshDailyDir]: {
+                    "pwsh.exe": "",
+                }
             },
         },
         {
@@ -432,7 +458,79 @@ if (process.platform === "win32") {
             },
         },
     ];
+
+    additionalPowerShellExes = {
+        "pwsh": "C:\\Users\\test\\pwsh\\pwsh.exe",
+        "pwsh-tilde": "~\\pwsh\\pwsh.exe",
+        "pwsh-no-exe": "C:\\Users\\test\\pwsh\\pwsh",
+        "pwsh-folder": "C:\\Users\\test\\pwsh\\",
+        "pwsh-folder-no-slash": "C:\\Users\\test\\pwsh",
+        "pwsh-single-quotes": "'C:\\Users\\test\\pwsh\\pwsh.exe'",
+        "pwsh-double-quotes": "\"C:\\Users\\test\\pwsh\\pwsh.exe\"",
+    };
+
+    successAdditionalTestCases = [
+        {
+            name: "Windows (Additional PowerShell Executables)",
+            platformDetails: {
+                operatingSystem: platform.OperatingSystem.Windows,
+                isOS64Bit: true,
+                isProcess64Bit: true,
+            },
+            environmentVars: {
+                "USERNAME": "test",
+                "USERPROFILE": "C:\\Users\\test",
+            },
+            expectedPowerShellSequence: [
+                {
+                    exePath: "C:\\Users\\test\\pwsh\\pwsh.exe",
+                    displayName: "pwsh",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: path.join(os.homedir(), "pwsh", "pwsh.exe"),
+                    displayName: "pwsh-tilde",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "C:\\Users\\test\\pwsh\\pwsh.exe",
+                    displayName: "pwsh-no-exe",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "C:\\Users\\test\\pwsh\\pwsh.exe",
+                    displayName: "pwsh-folder",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "C:\\Users\\test\\pwsh\\pwsh.exe",
+                    displayName: "pwsh-folder-no-slash",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "C:\\Users\\test\\pwsh\\pwsh.exe",
+                    displayName: "pwsh-single-quotes",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "C:\\Users\\test\\pwsh\\pwsh.exe",
+                    displayName: "pwsh-double-quotes",
+                    supportsProperArguments: true
+                },
+            ],
+            filesystem: {
+                "C:\\Users\\test\\pwsh": {
+                    "pwsh.exe": "",
+                },
+                [path.join(os.homedir(), "pwsh")]: {
+                    "pwsh.exe": "",
+                }
+            },
+        }
+    ];
 } else {
+    const pwshDailyDir = path.join(os.homedir(), ".powershell-daily");
+
     successTestCases = [
         {
             name: "Linux (all installations)",
@@ -441,6 +539,7 @@ if (process.platform === "win32") {
                 isOS64Bit: true,
                 isProcess64Bit: true,
             },
+            environmentVars: {},
             expectedPowerShellSequence: [
                 {
                     exePath: "/usr/bin/pwsh",
@@ -462,6 +561,11 @@ if (process.platform === "win32") {
                     displayName: "PowerShell Preview Snap",
                     supportsProperArguments: true
                 },
+                {
+                    exePath: path.join(pwshDailyDir, "pwsh"),
+                    displayName: "PowerShell Daily",
+                    supportsProperArguments: true
+                }
             ],
             filesystem: {
                 "/usr/bin": {
@@ -472,6 +576,9 @@ if (process.platform === "win32") {
                     "pwsh": "",
                     "pwsh-preview": "",
                 },
+                [pwshDailyDir]: {
+                    "pwsh": ""
+                }
             },
         },
         {
@@ -481,6 +588,7 @@ if (process.platform === "win32") {
                 isOS64Bit: true,
                 isProcess64Bit: true,
             },
+            environmentVars: {},
             expectedPowerShellSequence: [
                 {
                     exePath: "/usr/local/bin/pwsh",
@@ -492,12 +600,20 @@ if (process.platform === "win32") {
                     displayName: "PowerShell Preview",
                     supportsProperArguments: true
                 },
+                {
+                    exePath: path.join(pwshDailyDir, "pwsh"),
+                    displayName: "PowerShell Daily",
+                    supportsProperArguments: true
+                }
             ],
             filesystem: {
                 "/usr/local/bin": {
                     "pwsh": "",
                     "pwsh-preview": "",
                 },
+                [pwshDailyDir]: {
+                    "pwsh": ""
+                }
             },
         },
         {
@@ -507,6 +623,7 @@ if (process.platform === "win32") {
                 isOS64Bit: true,
                 isProcess64Bit: true,
             },
+            environmentVars: {},
             expectedPowerShellSequence: [
                 {
                     exePath: "/usr/bin/pwsh",
@@ -516,7 +633,7 @@ if (process.platform === "win32") {
             ],
             filesystem: {
                 "/usr/bin": {
-                    pwsh: "",
+                    "pwsh": "",
                 },
             },
         },
@@ -527,6 +644,7 @@ if (process.platform === "win32") {
                 isOS64Bit: true,
                 isProcess64Bit: true,
             },
+            environmentVars: {},
             expectedPowerShellSequence: [
                 {
                     exePath: "/snap/bin/pwsh",
@@ -536,7 +654,7 @@ if (process.platform === "win32") {
             ],
             filesystem: {
                 "/snap/bin": {
-                    pwsh: "",
+                    "pwsh": "",
                 },
             },
         },
@@ -547,6 +665,7 @@ if (process.platform === "win32") {
                 isOS64Bit: true,
                 isProcess64Bit: true,
             },
+            environmentVars: {},
             expectedPowerShellSequence: [
                 {
                     exePath: "/usr/local/bin/pwsh",
@@ -556,7 +675,7 @@ if (process.platform === "win32") {
             ],
             filesystem: {
                 "/usr/local/bin": {
-                    pwsh: "",
+                    "pwsh": "",
                 },
             },
         },
@@ -580,7 +699,7 @@ if (process.platform === "win32") {
             ],
             filesystem: {
                 "/Users/test/.dotnet/tools": {
-                    pwsh: "",
+                    "pwsh": "",
                 },
             },
         },
@@ -604,10 +723,75 @@ if (process.platform === "win32") {
             ],
             filesystem: {
                 "/home/test/.dotnet/tools": {
-                    pwsh: "",
+                    "pwsh": "",
                 },
             },
         },
+    ];
+
+    additionalPowerShellExes = {
+        "pwsh": "/home/test/bin/pwsh",
+        "pwsh-tilde": "~/bin/pwsh",
+        "pwsh-folder": "/home/test/bin/",
+        "pwsh-folder-no-slash": "/home/test/bin",
+        "pwsh-single-quotes": "'/home/test/bin/pwsh'",
+        "pwsh-double-quotes": "\"/home/test/bin/pwsh\"",
+    };
+
+    successAdditionalTestCases = [
+        {
+            name: "Linux/macOS (Additional PowerShell Executables)",
+            platformDetails: {
+                operatingSystem: platform.OperatingSystem.Linux,
+                isOS64Bit: true,
+                isProcess64Bit: true,
+            },
+            environmentVars: {
+                "USER": "test",
+                "HOME": "/home/test",
+            },
+            expectedPowerShellSequence: [
+                {
+                    exePath: "/home/test/bin/pwsh",
+                    displayName: "pwsh",
+                    supportsProperArguments: true
+                },
+                {
+                    // untildify ignores the HOME mock so this is platform-dependent
+                    exePath: path.join(os.homedir(), "bin", "pwsh"),
+                    displayName: "pwsh-tilde",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "/home/test/bin/pwsh",
+                    displayName: "pwsh-folder",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "/home/test/bin/pwsh",
+                    displayName: "pwsh-folder-no-slash",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "/home/test/bin/pwsh",
+                    displayName: "pwsh-single-quotes",
+                    supportsProperArguments: true
+                },
+                {
+                    exePath: "/home/test/bin/pwsh",
+                    displayName: "pwsh-double-quotes",
+                    supportsProperArguments: true
+                },
+            ],
+            filesystem: {
+                "/home/test/bin": {
+                    "pwsh": "",
+                },
+                [path.join(os.homedir(), "bin")]: {
+                    "pwsh": "",
+                }
+            },
+        }
     ];
 }
 
@@ -619,6 +803,7 @@ const errorTestCases: ITestPlatform[] = [
             isOS64Bit: true,
             isProcess64Bit: true,
         },
+        environmentVars: {},
         filesystem: {},
     },
     {
@@ -628,17 +813,16 @@ const errorTestCases: ITestPlatform[] = [
             isOS64Bit: true,
             isProcess64Bit: true,
         },
+        environmentVars: {},
         filesystem: {},
     },
 ];
 
-function setupTestEnvironment(testPlatform: ITestPlatform) {
+function setupTestEnvironment(testPlatform: ITestPlatform): void {
     mockFS(testPlatform.filesystem);
 
-    if (testPlatform.environmentVars) {
-        for (const envVar of Object.keys(testPlatform.environmentVars)) {
-            sinon.stub(process.env, envVar).value(testPlatform.environmentVars[envVar]);
-        }
+    for (const envVar of Object.keys(testPlatform.environmentVars)) {
+        sinon.stub(process.env, envVar).value(testPlatform.environmentVars[envVar]);
     }
 }
 
@@ -646,53 +830,53 @@ describe("Platform module", function () {
     it("Gets the correct platform details", function () {
         const platformDetails: platform.IPlatformDetails = platformMock.getPlatformDetails();
         switch (process.platform) {
-            case "darwin":
-                assert.strictEqual(
-                    platformDetails.operatingSystem,
-                    platform.OperatingSystem.MacOS,
-                    "Platform details operating system should be MacOS");
-                assert.strictEqual(
-                    platformDetails.isProcess64Bit,
-                    true,
-                    "VSCode on darwin should be 64-bit");
-                assert.strictEqual(
-                    platformDetails.isOS64Bit,
-                    true,
-                    "Darwin is 64-bit only");
-                break;
+        case "darwin":
+            assert.strictEqual(
+                platformDetails.operatingSystem,
+                platform.OperatingSystem.MacOS,
+                "Platform details operating system should be MacOS");
+            assert.strictEqual(
+                platformDetails.isProcess64Bit,
+                true,
+                "VSCode on darwin should be 64-bit");
+            assert.strictEqual(
+                platformDetails.isOS64Bit,
+                true,
+                "Darwin is 64-bit only");
+            break;
 
-            case "linux":
-                assert.strictEqual(
-                    platformDetails.operatingSystem,
-                    platform.OperatingSystem.Linux,
-                    "Platform details operating system should be Linux");
-                assert.strictEqual(
-                    platformDetails.isProcess64Bit,
-                    true,
-                    "Only 64-bit VSCode supported on Linux");
-                assert.strictEqual(
-                    platformDetails.isOS64Bit,
-                    true,
-                    "Only 64-bit Linux supported by PowerShell");
-                return;
+        case "linux":
+            assert.strictEqual(
+                platformDetails.operatingSystem,
+                platform.OperatingSystem.Linux,
+                "Platform details operating system should be Linux");
+            assert.strictEqual(
+                platformDetails.isProcess64Bit,
+                true,
+                "Only 64-bit VSCode supported on Linux");
+            assert.strictEqual(
+                platformDetails.isOS64Bit,
+                true,
+                "Only 64-bit Linux supported by PowerShell");
+            return;
 
-            case "win32":
-                assert.strictEqual(
-                    platformDetails.operatingSystem,
-                    platform.OperatingSystem.Windows,
-                    "Platform details operating system should be Windows");
-                assert.strictEqual(
-                    platformDetails.isProcess64Bit,
-                    process.arch === "x64",
-                    "Windows process bitness should match process arch");
-                assert.strictEqual(
-                    platformDetails.isOS64Bit,
-                    !!(platformDetails.isProcess64Bit || process.env.ProgramW6432),
-                    "Windows OS arch should match process bitness unless 64-bit env var set");
-                return;
+        case "win32":
+            assert.strictEqual(
+                platformDetails.operatingSystem,
+                platform.OperatingSystem.Windows,
+                "Platform details operating system should be Windows");
+            assert.strictEqual(
+                platformDetails.isProcess64Bit,
+                process.arch === "x64" || process.arch === "arm64",
+                "Windows process bitness should match process arch");
+            assert.strictEqual(
+                platformDetails.isOS64Bit,
+                !!(platformDetails.isProcess64Bit || process.env.ProgramW6432),
+                "Windows OS arch should match process bitness unless 64-bit env var set");
+            return;
 
-            default:
-                assert.fail("This platform is unsupported");
+        default:
+            assert.fail("This platform is unsupported");
         }
     });
 
@@ -747,9 +931,9 @@ describe("Platform module", function () {
                     const foundPowerShell = foundPowerShells[i];
                     const expectedPowerShell = testPlatform.expectedPowerShellSequence[i];
 
-                    assert.strictEqual(foundPowerShell && foundPowerShell.exePath, expectedPowerShell.exePath);
-                    assert.strictEqual(foundPowerShell && foundPowerShell.displayName, expectedPowerShell.displayName);
-                    assert.strictEqual(foundPowerShell && foundPowerShell.supportsProperArguments, expectedPowerShell.supportsProperArguments);
+                    assert.strictEqual(foundPowerShell?.exePath, expectedPowerShell.exePath);
+                    assert.strictEqual(foundPowerShell?.displayName, expectedPowerShell.displayName);
+                    assert.strictEqual(foundPowerShell?.supportsProperArguments, expectedPowerShell.supportsProperArguments);
                 }
 
                 assert.strictEqual(
@@ -783,7 +967,7 @@ describe("Platform module", function () {
             it(`Corrects the Windows PowerShell path on ${testPlatform.name}`, function () {
                 setupTestEnvironment(testPlatform);
 
-                function getWinPSPath(systemDir: string) {
+                function getWinPSPath(systemDir: string): string {
                     return path.join(
                         testPlatform.environmentVars.windir,
                         systemDir,
@@ -809,6 +993,30 @@ describe("Platform module", function () {
 
                 if (altWinPSPath) {
                     assert.strictEqual(powerShellExeFinder.fixWindowsPowerShellPath(altWinPSPath), winPSPath);
+                }
+            });
+        }
+    });
+
+    describe("PowerShell executables from 'powerShellAdditionalExePaths' are found", function () {
+        afterEach(function () {
+            sinon.restore();
+            mockFS.restore();
+        });
+
+        for (const testPlatform of successAdditionalTestCases) {
+            it(`Guesses for ${testPlatform.name}`, async function () {
+                setupTestEnvironment(testPlatform);
+
+                const powerShellExeFinder = new platformMock.PowerShellExeFinder(testPlatform.platformDetails, additionalPowerShellExes);
+
+                let i = 0;
+                for await (const additionalPwsh of powerShellExeFinder.enumerateAdditionalPowerShellInstallations()) {
+                    const expectedPowerShell = testPlatform.expectedPowerShellSequence[i];
+                    i++;
+
+                    assert.strictEqual(additionalPwsh.exePath, expectedPowerShell.exePath);
+                    assert.strictEqual(additionalPwsh.displayName, expectedPowerShell.displayName);
                 }
             });
         }

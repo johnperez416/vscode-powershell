@@ -1,57 +1,53 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { Disposable, EndOfLine, Position, Range, SnippetString,
-    TextDocument, TextDocumentChangeEvent, window, workspace } from "vscode";
+import {
+    Disposable, EndOfLine, Range, SnippetString,
+    TextDocument, TextDocumentChangeEvent, window, workspace
+} from "vscode";
 import { RequestType } from "vscode-languageclient";
 import { LanguageClient } from "vscode-languageclient/node";
-import { Logger } from "../logging";
-import Settings = require("../settings");
+import { Settings, CommentType, getSettings } from "../settings";
 import { LanguageClientConsumer } from "../languageClientConsumer";
 
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+interface ICommentHelpRequestArguments {
+}
+
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+interface ICommentHelpRequestResponse {
+    content: string[]
+}
+
 export const CommentHelpRequestType =
-    new RequestType<any, any, void>("powerShell/getCommentHelp");
-
-interface ICommentHelpRequestParams {
-    documentUri: string;
-    triggerPosition: Position;
-    blockComment: boolean;
-}
-
-interface ICommentHelpRequestResult {
-    content: string[];
-}
+    new RequestType<ICommentHelpRequestArguments, ICommentHelpRequestResponse, void>("powerShell/getCommentHelp");
 
 enum SearchState { Searching, Locked, Found }
 
 export class HelpCompletionFeature extends LanguageClientConsumer {
-    private helpCompletionProvider: HelpCompletionProvider;
-    private disposable: Disposable;
-    private settings: Settings.ISettings;
+    private helpCompletionProvider: HelpCompletionProvider | undefined;
+    private disposable: Disposable | undefined;
+    private settings: Settings;
 
-    constructor(private log: Logger) {
+    constructor() {
         super();
-        this.settings = Settings.load();
+        this.settings = getSettings();
 
-        if (this.settings.helpCompletion !== Settings.CommentType.Disabled) {
+        if (this.settings.helpCompletion !== CommentType.Disabled) {
             this.helpCompletionProvider = new HelpCompletionProvider();
-            const subscriptions = [];
-            workspace.onDidChangeTextDocument(this.onEvent, this, subscriptions);
-            this.disposable = Disposable.from(...subscriptions);
+            this.disposable = workspace.onDidChangeTextDocument(async (e) => { await this.onEvent(e); });
         }
     }
 
-    public dispose() {
-        if (this.disposable) {
-            this.disposable.dispose();
-        }
+    public dispose(): void {
+        this.disposable?.dispose();
     }
 
-    public setLanguageClient(languageClient: LanguageClient) {
-        this.languageClient = languageClient;
-        if (this.helpCompletionProvider) {
-            this.helpCompletionProvider.languageClient = languageClient;
-        }
+    public override onLanguageClientSet(languageClient: LanguageClient): void {
+        // Our helper class isn't in the session's list of language client
+        // consumers since we optionally create it, so we have to set it
+        // manually.
+        this.helpCompletionProvider?.onLanguageClientSet(languageClient);
     }
 
     public async onEvent(changeEvent: TextDocumentChangeEvent): Promise<void> {
@@ -60,22 +56,16 @@ export class HelpCompletionFeature extends LanguageClientConsumer {
             return;
         }
 
-        if (!(changeEvent && changeEvent.contentChanges)) {
-            this.log.writeWarning(`<${HelpCompletionFeature.name}>: ` +
-                `Bad TextDocumentChangeEvent message: ${JSON.stringify(changeEvent)}`);
-            return;
-        }
-
         if (changeEvent.contentChanges.length > 0) {
-            this.helpCompletionProvider.updateState(
+            this.helpCompletionProvider?.updateState(
                 changeEvent.document,
                 changeEvent.contentChanges[0].text,
                 changeEvent.contentChanges[0].range);
 
-            // todo raise an event when trigger is found, and attach complete() to the event.
-            if (this.helpCompletionProvider.triggerFound) {
+            // TODO: Raise an event when trigger is found, and attach complete() to the event.
+            if (this.helpCompletionProvider?.triggerFound) {
                 await this.helpCompletionProvider.complete();
-                await this.helpCompletionProvider.reset();
+                this.helpCompletionProvider.reset();
             }
         }
     }
@@ -83,7 +73,7 @@ export class HelpCompletionFeature extends LanguageClientConsumer {
 
 class TriggerFinder {
     private state: SearchState;
-    private document: TextDocument;
+    private document: TextDocument | undefined;
     private count: number;
 
     constructor(private triggerCharacters: string) {
@@ -97,30 +87,30 @@ class TriggerFinder {
 
     public updateState(document: TextDocument, changeText: string): void {
         switch (this.state) {
-            case SearchState.Searching:
-                if (changeText.length === 1 && changeText[0] === this.triggerCharacters[this.count]) {
-                    this.state = SearchState.Locked;
-                    this.document = document;
-                    this.count++;
-                }
-                break;
+        case SearchState.Searching:
+            // eslint-disable-next-line @typescript-eslint/prefer-string-starts-ends-with
+            if (changeText.length === 1 && changeText[0] === this.triggerCharacters[this.count]) {
+                this.state = SearchState.Locked;
+                this.document = document;
+                this.count++;
+            }
+            break;
 
-            case SearchState.Locked:
-                if (document === this.document &&
-                        changeText.length === 1 &&
-                        changeText[0] === this.triggerCharacters[this.count]) {
-                    this.count++;
-                    if (this.count === this.triggerCharacters.length) {
-                        this.state = SearchState.Found;
-                    }
-                } else {
-                    this.reset();
+        case SearchState.Locked:
+            // eslint-disable-next-line @typescript-eslint/prefer-string-starts-ends-with
+            if (document === this.document && changeText.length === 1 && changeText[0] === this.triggerCharacters[this.count]) {
+                this.count++;
+                if (this.count === this.triggerCharacters.length) {
+                    this.state = SearchState.Found;
                 }
-                break;
-
-            default:
+            } else {
                 this.reset();
-                break;
+            }
+            break;
+
+        default:
+            this.reset();
+            break;
         }
     }
 
@@ -130,25 +120,24 @@ class TriggerFinder {
     }
 }
 
-class HelpCompletionProvider {
+class HelpCompletionProvider extends LanguageClientConsumer {
     private triggerFinderHelpComment: TriggerFinder;
-    private lastChangeRange: Range;
-    private lastDocument: TextDocument;
-    private langClient: LanguageClient;
-    private settings: Settings.ISettings;
+    private lastChangeRange: Range | undefined;
+    private lastDocument: TextDocument | undefined;
+    private settings: Settings;
 
     constructor() {
+        super();
         this.triggerFinderHelpComment = new TriggerFinder("##");
-        this.settings = Settings.load();
+        this.settings = getSettings();
     }
 
     public get triggerFound(): boolean {
         return this.triggerFinderHelpComment.found;
     }
 
-    public set languageClient(value: LanguageClient) {
-        this.langClient = value;
-    }
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    public override onLanguageClientSet(_languageClient: LanguageClient): void {}
 
     public updateState(document: TextDocument, changeText: string, changeRange: Range): void {
         this.lastDocument = document;
@@ -161,36 +150,37 @@ class HelpCompletionProvider {
     }
 
     public async complete(): Promise<void> {
-        if (this.langClient === undefined) {
+        if (this.lastChangeRange === undefined || this.lastDocument === undefined) {
             return;
         }
 
         const triggerStartPos = this.lastChangeRange.start;
         const doc = this.lastDocument;
 
-        const result = await this.langClient.sendRequest(CommentHelpRequestType, {
+        const client = await LanguageClientConsumer.getLanguageClient();
+        const result = await client.sendRequest(CommentHelpRequestType, {
             documentUri: doc.uri.toString(),
             triggerPosition: triggerStartPos,
-            blockComment: this.settings.helpCompletion === Settings.CommentType.BlockComment,
+            blockComment: this.settings.helpCompletion === CommentType.BlockComment,
         });
 
-        if (!(result && result.content)) {
+        if (result.content.length === 0) {
             return;
         }
 
         const replaceRange = new Range(triggerStartPos.translate(0, -1), triggerStartPos.translate(0, 1));
 
-        // TODO add indentation level to the help content
+        // TODO: add indentation level to the help content
         // Trim leading whitespace (used by the rule for indentation) as VSCode takes care of the indentation.
         // Trim the last empty line and join the strings.
         const lines: string[] = result.content;
         const text = lines
-            .map((x) => (x as any).trimLeft())
+            .map((x) => x.trimStart())
             .join(this.getEOL(doc.eol));
 
         const snippetString = new SnippetString(text);
 
-        window.activeTextEditor.insertSnippet(snippetString, replaceRange);
+        await window.activeTextEditor?.insertSnippet(snippetString, replaceRange);
     }
 
     private getEOL(eol: EndOfLine): string {

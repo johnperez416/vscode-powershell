@@ -1,24 +1,19 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import * as assert from "assert";
+import assert from "assert";
 import * as vscode from "vscode";
 import { IPowerShellExtensionClient } from "../../src/features/ExternalApi";
 import utils = require("../utils");
-import { checkIfDirectoryExists } from "../../src/utils"
+import { checkIfDirectoryExists, checkIfFileExists, ShellIntegrationScript } from "../../src/utils";
 
 describe("Path assumptions", function () {
     let globalStorageUri: vscode.Uri;
+    let logUri: vscode.Uri;
     before(async () => {
         const extension: IPowerShellExtensionClient = await utils.ensureEditorServicesIsConnected();
         globalStorageUri = extension.getStorageUri();
-    });
-
-    // TODO: This is skipped because it interferes with other tests. Either
-    // need to find a way to close the opened folder via a Code API, or find
-    // another way to test this.
-    it.skip("Opens the examples folder at the expected path", async function () {
-        assert(await vscode.commands.executeCommand("PowerShell.OpenExamplesFolder"));
+        logUri = extension.getLogUri();
     });
 
     it("Creates the session folder at the correct path", async function () {
@@ -26,6 +21,11 @@ describe("Path assumptions", function () {
     });
 
     it("Creates the log folder at the correct path", async function () {
-        assert(await checkIfDirectoryExists(vscode.Uri.joinPath(globalStorageUri, "logs")));
+        assert(await checkIfDirectoryExists(logUri));
+    });
+
+    it("Finds the Terminal Shell Integration Script", async function () {
+        // If VS Code changes the location of the script, we need to know ASAP (as it's not a public API).
+        assert(await checkIfFileExists(ShellIntegrationScript));
     });
 });

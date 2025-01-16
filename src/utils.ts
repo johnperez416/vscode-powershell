@@ -1,15 +1,40 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-"use strict";
-
 import os = require("os");
 import path = require("path");
 import vscode = require("vscode");
+import { satisfies } from "semver";
 
 export const PowerShellLanguageId = "powershell";
 
-export function getPipePath(pipeName: string) {
+// Path to the shell integration script in the VS Code installation
+// See https://github.com/microsoft/vscode/pull/227244
+const shellIntegrationMoved = satisfies(vscode.version, ">=1.94", { includePrerelease: true });
+export const ShellIntegrationScript = path.join(vscode.env.appRoot, "out", "vs", "workbench", "contrib", "terminal",
+    shellIntegrationMoved ? "common" : "browser",
+    shellIntegrationMoved ? "scripts" : "media",
+    "shellIntegration.ps1");
+
+export function escapeSingleQuotes(p: string): string {
+    return p.replace(new RegExp("'", "g"), "''");
+}
+
+export function stripQuotePair(p: string | undefined): string | undefined {
+    if (p === undefined) {
+        return p;
+    }
+
+    // Remove matching surrounding quotes from p (without regex)
+    if (p.startsWith("'") && p.endsWith("'")
+        || p.startsWith("\"") && p.endsWith("\"")) {
+        return p.slice(1, -1);
+    }
+
+    return p;
+}
+
+export function getPipePath(pipeName: string): string {
     if (os.platform() === "win32") {
         return "\\\\.\\pipe\\" + pipeName;
     } else {
@@ -22,15 +47,16 @@ export function getPipePath(pipeName: string) {
 // Check that the file or directory exists in an asynchronous manner that relies
 // solely on the VS Code API, not Node's fs library, ignoring symlinks.
 async function checkIfFileOrDirectoryExists(targetPath: string | vscode.Uri, type: vscode.FileType): Promise<boolean> {
+    if (targetPath === "") {
+        return false;
+    }
     try {
         const stat: vscode.FileStat = await vscode.workspace.fs.stat(
             targetPath instanceof vscode.Uri
                 ? targetPath
                 : vscode.Uri.file(targetPath));
-        // tslint:disable-next-line:no-bitwise
         return (stat.type & type) !== 0;
     } catch {
-        // TODO: Maybe throw if it's not a FileNotFound exception.
         return false;
     }
 }
@@ -51,7 +77,7 @@ export async function readDirectory(directoryPath: string | vscode.Uri): Promise
     return items.map(([name, _type]) => name);
 }
 
-export function getTimestampString() {
+export function getTimestampString(): string {
     const time = new Date();
     return `[${time.getHours()}:${time.getMinutes()}:${time.getSeconds()}]`;
 }
